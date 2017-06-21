@@ -1,0 +1,154 @@
+---
+title: "Thesis Machine Learning models"
+output:
+  html_document: default
+  pdf_document: default
+  word_document: default
+---
+# Setup & Loading Data Frames 
+
+```{r setup}
+require(tidyverse)
+df <- read.csv("data_complete.csv")
+AF <- read.csv("ready_for_analysis.csv")
+set.seed(1234)
+perm <- sample.int(nrow(AF))
+data_train <- AF[perm[(1:258)], ]
+data_test <- AF[perm[(-(1:258))], ]
+```
+
+# Lasso Regression using GLMNET package
+```{r glm_split, include = FALSE, cache = FALSE}
+require("glmnet")
+set.seed(1234)
+perm <- sample.int(nrow(AF))
+data_train <- AF[perm[(1:258)], ]
+data_test <- AF[perm[(-(1:258))], ]
+xmat_train <- model.matrix(~. - 1, data = data_train[,-c(1,2)])
+xmat_test <- model.matrix(~. - 1, data = data_test[,-c(1,2)])
+```
+
+### Cross-validation and model fit
+```{r glm_cv, cache = FALSE}
+set.seed(1234)
+cv_fake_lasso <- cv.glmnet(x = xmat_train, y = data_train[, "fake"], family = "binomial", alpha = 1)
+best.lambda <- cv_fake_lasso$lambda.1se
+set.seed(1234)
+fit_fake_lasso <- glmnet(x = xmat_train, y = data_train[, "fake"], alpha = 1,
+                         family = "binomial", lambda =best.lambda)
+fit_fake_lasso
+```
+
+### Predicting on test set.
+```{r glm_variables, cache = FALSE}
+set.seed(1234)
+pred <- predict(object = fit_fake_lasso, newx = xmat_test, type = "response", s = best.lambda)
+data_test$predict <- pred
+data_test$predict[data_test$predict < 0.5] <- 0
+data_test$predict[data_test$predict >= 0.5] <- 1
+summary(data_test$predict)
+confmat <- table(Actual = data_test$fake, Predicted = data_test$predict)
+confmat
+
+prop.table(confmat, 1)
+```
+
+### Identifying Type I errors in regression model
+```{r typeI glmnet, eval = TRUE, cache = TRUE}
+#type I errors
+data_test$predict <- as.numeric(data_test$predict)
+error_I <- data_test %>% select(predict, fake, Id) %>% filter(predict == 1, fake == 0) 
+type_I <- error_I$Id
+df %>% select(Id, publication, title) %>% filter(Id %in% type_I)
+
+```
+
+# Random Forest model
+
+###Random Forest model fit
+```{r random forest fit, chache = TRUE}
+require(randomForest)
+set.seed(1234)
+random_forest <- randomForest(factor(fake) ~ ., data = data_train[,-1], mtry = 100, ntree = 5000,
+                         maxnodes = 20, nodesize = 4, importance = TRUE, do.trace = FALSE)
+random_forest
+```
+
+### Random forest model predictions
+```{r random forest predict, cache = TRUE}
+set.seed(1234)
+pred <- predict(random_forest, newdata = data_test)
+data_test$predict <- pred
+summary(data_test$predict)
+confmat <- table(Actual = data_test$fake, Predicted = data_test$predict)
+confmat
+
+prop.table(confmat, 1)
+```
+
+### Variable importance random forest
+```{r var importance random forest, cache = TRUE}
+varImpPlot(random_forest)
+```
+
+### Random forest type I errors 
+```{r random forest errors, cache = TRUE}
+error_I <- data_test %>% select(predict, fake, Id) %>% filter(predict == 1, fake == 0) 
+type_I <- error_I$Id
+df %>% select(Id, publication, title) %>% filter(Id %in% type_I)
+```
+
+# Boosted Model using XGBoost package
+```{r xgboost model fit, echo = TRUE, cache = TRUE}
+require("xgboost")
+set.seed(1234)
+perm <- sample.int(nrow(AF))
+train <- AF[perm[1:258], ]
+test <- AF[perm[-(1:258)], ]
+
+
+dtrain <- xgb.DMatrix(data = as.matrix(train[, -c(1,2)]), 
+                      label = train$fake)
+dtest <- xgb.DMatrix(data = as.matrix(test[, -c(1,2)]), 
+                     label = test$fake)
+set.seed(1234)
+AF_xgb <- xgb.train(data = dtrain,
+                    callbacks = list(cb.evaluation.log()),
+                    watchlist = list(test = dtest, train = dtrain), 
+                    nrounds = 8500, print_every_n = 1000,
+                    params = list(max_depth = 2, eta = 0.001, nthread = 3,
+                                  objective = "binary:logistic", colsample_bytree = 0.1))
+
+```
+
+### XGBoost predictions
+```{r xgboost_predict, cache = TRUE}
+set.seed(1234)
+preds <- predict(AF_xgb, newdata = dtest)
+test$preds <- preds
+test$preds[test$preds < 0.5] <- 0
+test$preds[test$preds >= 0.5] <- 1
+summary(test$preds)
+confmat <-table(Actual = test$fake, Predicted = test$preds)
+confmat
+prop.table(confmat, 1)
+```
+
+### XGBoost importance measures
+```{r xgboost importance, cache = FALSE}
+library(xgboost)
+importance_matrix <- xgb.importance(feature_names = colnames(dtrain), model = AF_xgb)
+importance_matrix %>% arrange(desc(Gain)) %>% head(n = 20)
+xgb.plot.importance(importance_matrix = head(importance_matrix, n = 20), xlab = "Relative Importance of Variables" )
+```
+
+### XGBoost type I errors
+```{r typeI xgboost, eval = TRUE, cache = TRUE}
+#Identifying type I errors
+error_I <- test %>% select(preds, fake, Id) %>% filter(preds == 1, fake == 0) 
+type_I <- error_I$Id
+df %>% select(Id, publication, title) %>% filter(Id %in% type_I)
+```
+
+
+
